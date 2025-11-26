@@ -1,0 +1,2206 @@
+---
+title: "Data sets and initial insights"
+author: "Marit Metz"
+date: "2025-04-07"
+output: html_document
+---
+
+
+Install packages
+```{r, echo=FALSE}
+library('ggplot2')
+library('dplyr')
+library('lme4')
+library("car")
+library("stringr")
+
+```
+
+# 1. Loading Data
+
+Load the datasets.
+
+```{r load-data}
+# Define the path to the directory containing the .RData files
+data_directory <- "C:/Users/Marit/Downloads/Documenten UvA/ResMas/Thesis/Conflict tasks/Data/Eisenberg_data/data/"
+
+# Get a list of all .RData files in the directory
+rdata_files <- list.files(path = data_directory, pattern = "\\.RData$", full.names = TRUE)
+
+# Loop through each .RData file and load it
+for (file in rdata_files) {
+  load(file)
+  print(paste("Loaded:", file))
+}
+
+
+data_simon$correct <- as.numeric(as.character(data_simon$correct))
+data_stroop$correct <- as.numeric(as.character(data_stroop$correct))
+
+```
+
+
+
+##Creating the dataset from the CSV
+```{r}
+# Define the path to the directory containing the CSV files
+# data_directory <- "C:/Users/Marit/Downloads/Documenten UvA/ResMas/Thesis/Conflict tasks/Data/Original data/"
+data_directory <- "C:/Users/Marit/Downloads/Documenten UvA/ResMas/Thesis/Conflict tasks/Data/Retest data/"
+# Get a list of all .csv files in the directory
+csv_files <- list.files(path = data_directory, pattern = "\\.csv$", full.names = TRUE)
+
+# Loop through each CSV file and load it
+for (file in csv_files) {
+  # Read the CSV file into a data frame
+  data <- read.csv(file)
+  
+  # Extract the file name without the path and extension
+  file_name <- tools::file_path_sans_ext(basename(file)) 
+  
+  # Use the file name to create a variable and assign the data to it
+  assign(file_name, data)
+  # Optionally, store the data in a list or assign it to a variable
+  # For example, storing all data frames in a list:
+  data_list <- list()  # Initialize an empty list
+  data_list[[file]] <- data  # Store each file's data with the file name as the list element
+
+  print(paste("Loaded:", file))
+  }
+ 
+
+```
+
+
+
+# 2. Simon task
+## Selecting variables for Simon
+```{r}
+# Subset the dataframe
+full_data_simon = simon[, c('worker_id',"exp_stage", 'rt', 'condition',  'stim_color', 'stim_side',  'correct_response','key_press','correct')]
+
+# Update 'response' based on 'key_press'
+full_data_simon$key_press <- ifelse(full_data_simon$key_press == 39, "right", 
+                          ifelse(full_data_simon$key_press == 37, "left", full_data_simon$key_press))
+
+# Update 'correct_response' based on its value
+full_data_simon$correct_response <- ifelse(full_data_simon$correct_response == 39, "right", 
+                                  ifelse(full_data_simon$correct_response == 37, "left", full_data_simon$correct_response))
+
+# only keeping the test block
+full_data_simon = full_data_simon[full_data_simon$exp_stage == 'test',]
+
+#clean dataset
+data_simon <- full_data_simon[, c("worker_id", "rt", "stim_color", "stim_side","condition", "key_press", "correct")]
+# Rename columns
+colnames(data_simon) <- c("subject", "rt", "stim_relevant", "stim_irrelevant","congruence", "R", "correct")
+# Convert rt from ms to seconds
+data_simon$rt <- data_simon$rt / 1000
+
+table(data_simon$subject)
+length(unique(data_simon$subject))
+
+
+```
+
+## Outlier detection of Eisenberg
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+# Create a new column to track exclusion reasons
+data_simon$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_simon, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_simon$exclusion_reason[data_simon$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_simon, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_simon$exclusion_reason[data_simon$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(correct ~ subject, data = data_simon, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_simon$exclusion_reason[data_simon$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_simon$subject, data_simon$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_simon$exclusion_reason[data_simon$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_simon, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_simon), "\n")
+# Exclude those workers from the dataset
+data_simon <- data_simon[!data_simon$subject %in% excluded_worker_ids, ] # removing 218, 375, 550
+# Print the number of rows before and after exclusion
+cat("Number of rows before exclusion:", nrow(data_simon), "\n")
+
+data_simon <- data_simon[, !(colnames(data_simon) %in% "exclusion_reason")]
+
+```
+
+## After Eisenberg's criteria
+Still some very fast RTs remaining
+```{r}
+sum(data_simon$rt == -0.001, na.rm = TRUE)
+
+#removing all omitted trials
+data_simon = data_simon[data_simon$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_simon$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_simon$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_simon$outlier_combined <- outliers_combined
+data_simon$outlier_z <- outliers_z
+data_simon$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participant (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_simon, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_simon <- merge(data_simon, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# Step 5: Plot histograms of RTs, split by block
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_simon[data_simon$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) + 
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8)) 
+#   
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_simon <- data_simon %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold | rt < fast_threshold, -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold, -fast_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_simon = data_simon[data_simon$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_simon, FUN = length)
+# Calculate the number of omitted trials (assuming each participant should have 100 trials)
+total_trials_per_worker$omitted_trials <- 100 - total_trials_per_worker$rt
+
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 100) * 100
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] # excludes participant 541
+data_simon <- data_simon[!data_simon$subject %in% excluded_omit, ]
+print(paste("Participants missing too much data:", paste(excluded_omit, collapse = ", ")))
+
+#recheck median rt
+median_rt_check <- aggregate(rt ~ subject, data = data_simon, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+print(paste("Participants failing median RT check:", paste(failed_median_rt, collapse = ", ")))
+#recheck accuracy
+accuracy_check <- aggregate(correct ~ subject, data = data_simon, FUN = function(x) mean(x, na.rm = TRUE))
+failed_accuracy <- accuracy_check$subject[accuracy_check$correct <= 0.60]
+print(paste("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", ")))
+#recheck single response
+response_freq_table <- table(data_simon$subject, data_simon$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+# Total responses per subject
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+print(paste("Participants overusing a single response:", paste(failed_single_response, collapse = ", ")))
+
+# remove recheck fails
+all_failed <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+data_simon <- data_simon[!data_simon$subject %in% all_failed, ]
+
+# # remove 100% accuracy
+# # Step 1: Compute accuracy per participant
+# accuracy_check <- aggregate(correct ~ subject, data = data_simon, FUN = function(x) mean(x, na.rm = TRUE))
+# # Step 2: Identify participants with 100% accuracy
+# perfect_accuracy_subjects <- accuracy_check$subject[accuracy_check$correct == 1]
+# # Step 3: Remove them from the dataset
+# data_simon <- data_simon[!data_simon$subject %in% perfect_accuracy_subjects, ]
+# # Step 4: (Optional) Print removed subject IDs
+# cat("Removed participants with 100% accuracy:", paste(perfect_accuracy_subjects, collapse = ", "), "\n","#", length(perfect_accuracy_subjects)) #rmoving 62 participants
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_simon[data_simon$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+
+
+
+#clean dataset
+data_simon <- data_simon[, c("subject", "rt", "stim_relevant", "stim_irrelevant","congruence", "R", "correct")]
+length(unique(data_simon$subject)) #518 participants remaining
+# retest data has 150 of 151 participants remaining
+
+```
+
+##Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+data_simon$correct <- as.numeric(as.character(data_simon$correct))
+# # Create a new column 'correctness' based on the conditions 
+# data_simon <- data_simon %>%
+#   mutate(correctness = case_when(
+#     # Conditions for congruent and stim_irrelevant == right
+#     congruence == "congruent" & stim_irrelevant == "right" & 
+#       ((stim_relevant == "blue" & R == "right") | (stim_relevant == "red" & R == "right")) ~ 1,
+#     
+#     # Conditions for congruent and stim_irrelevant == left
+#     congruence == "congruent" & stim_irrelevant == "left" & 
+#       ((stim_relevant == "blue" & R == "left") | (stim_relevant == "red" & R == "left")) ~ 1,
+#     
+#     # Conditions for incongruent and stim_irrelevant == right
+#     congruence == "incongruent" & stim_irrelevant == "right" & 
+#       ((stim_relevant == "blue" & R == "right") | (stim_relevant == "red" & R == "right")) ~ 0,
+#     
+#     # Conditions for incongruent and stim_irrelevant == left
+#     congruence == "incongruent" & stim_irrelevant == "left" & 
+#       ((stim_relevant == "blue" & R == "left") | (stim_relevant == "red" & R == "left")) ~ 0,
+#     
+#     # For other incongruent situations, set to 1
+#     congruence == "incongruent" ~ 1,
+#     
+#     # Default case to handle situations where no other conditions match
+#     TRUE ~ 0
+#   ))
+
+
+
+tapply(data_simon$rt, data_simon[,c("stim_relevant", "stim_irrrelevant", "congruence"), mean])
+
+# effects on rt
+simon_rt_factors <- lmer(rt ~ stim_relevant * congruence + (1 | subject), data = data_simon)
+Anova(simon_rt_factors)
+# effects on accuracy
+simon_acc_factors <- glmer(correct ~ stim_relevant  * congruence + (1 | subject), data = data_simon, family = binomial("probit"))
+Anova(simon_acc_factors)
+
+
+
+# based on above significance
+tapply(data_simon$rt,data_simon$congruence,mean)
+tapply(data_simon$rt,data_simon$stim_relevant,mean)
+tapply(data_simon$correct,data_simon$congruence,mean)
+mean_rt_cong <- aggregate(rt ~ congruence + stim_relevant, data = data_simon, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+mean_acc_cong <- aggregate(correct ~ congruence + stim_relevant, data = data_simon, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+
+```
+
+## Load data
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_simon.Rdata")
+simon <- data_simon[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "R", "correct", "congruence")]
+```
+## Change data to EMC format
+Above dataset doesn't allow for the function of accuracy as EMC needs it. Thus change the values of R to colors instead of sides so we can equal them to the stim_relevant values to give correctness of response. 
+```{r}
+simon$R <- ifelse(
+  simon$correct == 1,
+  simon$stim_relevant,
+  ifelse(
+    simon$stim_relevant == "blue", "red", "blue"
+  )
+)
+
+```
+
+To accurately define congruency in EMC the irrelevant stimulus column also needs to be defined as colors. 
+```{r}
+# Create or overwrite the irrelevant_stimulus column
+simon$stim_irrelevant <- ifelse(
+  simon$congruence == "congruent",
+  simon$stim_relevant,
+  ifelse(
+    simon$stim_relevant == "blue", "red", "blue"
+  )
+)
+
+```
+
+
+Lastly selecting the required variables
+```{r}
+
+
+simon <- simon[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "R")]
+colnames(simon) <- c("subjects", "rt", "RS", "IS", "R")
+simon$subjects <- as.factor(simon$subjects)
+simon$R <- as.factor(simon$R)
+simon$RS <- as.factor(simon$RS)
+simon$IS <- as.factor(simon$IS)
+
+
+simonSmall <- simon[simon$subjects %in% levels(simon$subjects)[1:50],]
+simonSmall$subjects <- droplevels(simonSmall$subjects)
+
+
+```
+
+# 3. Stroop
+##Selecting variables Stroop
+```{r}
+# Subset the dataframe
+full_data_stroop = stroop[, c('worker_id',"exp_stage", 'rt', 'condition',  'stim_color', 'stim_word',  'correct_response','key_press','correct')]
+
+# Update 'response' based on 'key_press'
+full_data_stroop$key_press <- ifelse(full_data_stroop$key_press == 66, "blue", 
+                          ifelse(full_data_stroop$key_press == 82, "red", 
+                                 ifelse(full_data_stroop$key_press == 71, "green", full_data_stroop$key_press)))
+
+# Update 'correct_response' based on its value
+full_data_stroop$correct_response <- ifelse(full_data_stroop$correct_response == 66, "blue", 
+                                ifelse(full_data_stroop$correct_response == 82, "red", 
+                                 ifelse(full_data_stroop$correct_response == 71, "green", full_data_stroop$correct_response)))
+# only keeping the test block
+full_data_stroop = full_data_stroop[full_data_stroop$exp_stage == 'test',]
+
+
+
+#clean dataset
+data_stroop <- full_data_stroop[, c("worker_id", "rt", "stim_color", "stim_word","condition", "key_press")]
+# Rename columns
+colnames(data_stroop) <- c("subject", "rt", "stim_relevant", "stim_irrelevant","congruence", "R")
+# Convert rt from ms to seconds
+data_stroop$rt <- data_stroop$rt / 1000
+# table(data_stroop$subject)
+length(unique(data_stroop$subject))
+
+```
+## Outlier detection with Eisenberg's criteria
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+# Create a new column to track exclusion reasons
+data_stroop$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_stroop, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_stroop$exclusion_reason[data_stroop$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_stroop, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_stroop$exclusion_reason[data_stroop$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(data_stroop$stim_relevant == data_stroop$R ~ subject, data = data_stroop, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_stroop$exclusion_reason[data_stroop$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_stroop$subject, data_stroop$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_stroop$exclusion_reason[data_stroop$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_stroop, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_stroop), "\n")
+# Exclude those workers from the dataset
+data_stroop <- data_stroop[!data_stroop$subject %in% excluded_worker_ids, ] # removing participant 295
+# Print the number of rows before and after exclusion
+cat("Number of rows before exclusion:", nrow(data_stroop), "\n")
+
+data_stroop <- data_stroop[, !(colnames(data_stroop) %in% "exclusion_reason")]
+
+```
+
+## Outlier investigation after removing with Eisenberg's criteria
+```{r}
+sum(data_stroop$rt == -0.001, na.rm = TRUE)
+
+#removing all omitted trials
+data_stroop = data_stroop[data_stroop$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_stroop$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_stroop$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_stroop$outlier_combined <- outliers_combined
+data_stroop$outlier_z <- outliers_z
+data_stroop$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participant (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_stroop, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_stroop <- merge(data_stroop, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# Step 5: Plot histograms of RTs, split by block
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_stroop[data_stroop$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) + 
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8)) 
+#   
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_stroop <- data_stroop %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    # fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold , -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_stroop = data_stroop[data_stroop$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_stroop, FUN = length)
+# Calculate the number of omitted trials (assuming each participant should have 96 trials)
+total_trials_per_worker$omitted_trials <- 96 - total_trials_per_worker$rt
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 96) * 100
+
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] 
+data_stroop <- data_stroop[!data_stroop$subject %in% excluded_omit, ]
+
+# recheck median
+median_rt_check <- aggregate(rt ~ subject, data = data_stroop, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+cat("Participants failing median RT check:", paste(failed_median_rt, collapse = ", "), "\n")
+#recheck accuracy
+accuracy_check <- aggregate(data_stroop$stim_relevant == data_stroop$R ~ subject, data = data_stroop, FUN = mean)
+colnames(accuracy_check)[2] <- "accuracy"
+failed_accuracy <- accuracy_check$subject[accuracy_check$accuracy <= 0.60]
+cat("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", "), "\n")
+# recheck same response
+response_freq_table <- table(data_stroop$subject, data_stroop$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+# Total responses per subject
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+cat("Participants overusing a single response:", paste(failed_single_response, collapse = ", "), "\n")
+
+# # perfect accuracy
+# perfect_accuracy <- accuracy_check$subject[accuracy_check$accuracy == 1]
+# cat("Participants with 100% accuracy:", paste(perfect_accuracy, collapse = ", "), "\n", "#", length(perfect_accuracy)) # 79 participants with perfect accuracy
+
+#remove
+# all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response, perfect_accuracy))
+all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+cat("Participants to exclude (any criterion):", paste(all_fails, collapse = ", "), "\n")
+# Exclude from dataset
+data_stroop <- data_stroop[!data_stroop$subject %in% all_fails, ]
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_stroop[data_stroop$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+# 
+
+#clean dataset
+data_stroop <- data_stroop[, c("subject", "rt", "stim_relevant", "stim_irrelevant","congruence", "R")]
+length(unique(data_stroop$subject)) #442 participants remaining. 
+
+```
+
+## Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+# effects on rt
+stroop_rt_factors <- lmer(rt ~ stim_relevant * congruence + (1 | subject), data = data_stroop)
+Anova(stroop_rt_factors)
+# effects on accuracy
+stroop_acc_factors <- glmer(data_stroop$stim_relevant == data_stroop$R ~ stim_relevant * congruence + (1 | subject), data = data_stroop, family = binomial("probit"))
+Anova(stroop_acc_factors)
+
+
+# based on above significance
+tapply(data_stroop$rt,data_stroop$congruence,mean)
+tapply(data_stroop$rt,data_stroop$stim_relevant,mean)
+tapply(data_stroop$stim_relevant==data_stroop$R,data_stroop$congruence,mean)
+tapply(data_stroop$stim_relevant==data_stroop$R,data_stroop$stim_relevant,mean)
+
+mean_rt_cong <- aggregate(rt ~ congruence + stim_relevant, data = data_stroop, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+mean_acc_cong <- aggregate( data_stroop$stim_relevant==data_stroop$R ~ congruence + stim_relevant, data = data_stroop, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+
+```
+
+
+## To EMC format
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_stroop.Rdata")
+stroop <- data_stroop[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "R")]
+
+
+colnames(stroop) <- c("subjects", "rt", "RS", "IS", "R")
+stroop$subjects <- as.factor(stroop$subjects)
+stroop$R <- as.factor(stroop$R)
+stroop$RS <- as.factor(stroop$RS)
+stroop$IS <- as.factor(stroop$IS)
+
+
+stroopSmall <- stroop[stroop$subjects %in% levels(stroop$subjects)[1:50],]
+stroopSmall$subjects <- droplevels(stroopSmall$subjects)
+```
+
+
+
+# 4. Attentional network task
+## Selecting variables for Attentional network task
+```{r}
+
+# Subset the dataframe
+full_data_ant = attention_network_task[, c('worker_id',"exp_stage", 'rt',  'flanker_type',  'cue', 'flanker_location',  'flanker_middle_direction','key_press','correct_response', 'correct')]
+
+# Update 'response' based on 'key_press'
+full_data_ant$key_press <- ifelse(full_data_ant$key_press == 39, "right", 
+                          ifelse(full_data_ant$key_press == 37, "left", full_data_ant$key_press))
+
+# Update 'correct_response' based on its value
+full_data_ant$correct_response <- ifelse(full_data_ant$correct_response == 39, "right", 
+                                  ifelse(full_data_ant$correct_response == 37, "left", full_data_ant$correct_response))
+
+# only keeping the test block
+full_data_ant = full_data_ant[full_data_ant$exp_stage == 'test',]
+
+
+
+
+#clean dataset
+data_ant <- full_data_ant[, c("worker_id", "rt", "flanker_middle_direction", "flanker_location","flanker_type", "cue",  "key_press")]
+# Rename columns
+colnames(data_ant) <- c("subject", "rt", "stim_relevant", "stim_irrelevant","congruence","cue", "R")
+# Convert rt from ms to seconds
+data_ant$rt <- data_ant$rt / 1000
+# table(data_ant$subject)
+length(unique(data_ant$subject))
+```
+## Outlier detection
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+# Create a new column to track exclusion reasons
+data_ant$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_ant, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_ant$exclusion_reason[data_ant$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_ant, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_ant$exclusion_reason[data_ant$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(data_ant$stim_relevant == data_ant$R ~ subject, data = data_ant, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_ant$exclusion_reason[data_ant$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_ant$subject, data_ant$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_ant$exclusion_reason[data_ant$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_ant, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_ant), "\n")
+# Exclude those workers from the dataset
+data_ant <- data_ant[!data_ant$subject %in% excluded_worker_ids, ] # removing participants 118, 357 & 462
+# Print the number of rows before and after exclusion
+cat("Number of rows after exclusion:", nrow(data_ant), "\n")
+
+data_ant <- data_ant[, !(colnames(data_ant) %in% "exclusion_reason")]
+length(unique(data_ant$subject))
+
+```
+## After Eisenberg's criteria
+```{r}
+sum(data_ant$rt == -0.001, na.rm = TRUE)
+
+#removing all omitted trials
+data_ant = data_ant[data_ant$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_ant$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_ant$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_ant$outlier_combined <- outliers_combined
+data_ant$outlier_z <- outliers_z
+data_ant$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participant (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_ant, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_ant <- merge(data_ant, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# Step 5: Plot histograms of RTs, split by block
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_ant[data_ant$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) + 
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8)) 
+#   
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_ant <- data_ant %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold | rt < fast_threshold, -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold, -fast_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_ant = data_ant[data_ant$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_ant, FUN = length)
+# Calculate the number of omitted trials (assuming each participant should have 96 trials)
+total_trials_per_worker$omitted_trials <- 144 - total_trials_per_worker$rt
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 144) * 100
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] # excludes participant 305
+data_ant <- data_ant[!data_ant$subject %in% excluded_omit, ]
+
+
+# Recheck: Median RT > 200 ms
+median_rt_check <- aggregate(rt ~ subject, data = data_ant, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+cat("Participants failing median RT check:", paste(failed_median_rt, collapse = ", "), "\n")
+
+# Recheck: Accuracy > 60%
+accuracy_check <- aggregate(data_ant$stim_relevant == data_ant$R ~ subject, data = data_ant, FUN = mean)
+colnames(accuracy_check)[2] <- "accuracy"
+failed_accuracy <- accuracy_check$subject[accuracy_check$accuracy <= 0.60]
+cat("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", "), "\n")
+
+# Recheck: No single response > 95%
+response_freq_table <- table(data_ant$subject, data_ant$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+cat("Participants overusing a single response:", paste(failed_single_response, collapse = ", "), "\n")
+
+# Remove: Participants with 100% Accuracy
+# perfect_accuracy <- accuracy_check$subject[accuracy_check$accuracy == 1]
+# cat("Participants with 100% accuracy:", paste(perfect_accuracy, collapse = ", "), "\n", "#", length(perfect_accuracy)) # removing 84 participants
+
+# Exclude all failing participants
+# all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response, perfect_accuracy))
+all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+cat("Participants to exclude (any criterion):", paste(all_fails, collapse = ", "), "\n")
+
+# Final exclusion
+data_ant <- data_ant[!data_ant$subject %in% all_fails, ]
+
+
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_ant[data_ant$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+
+
+#clean dataset
+data_ant <- data_ant[, c("subject", "rt", "stim_relevant", "stim_irrelevant","congruence","cue", "R")]
+length(unique(data_ant$subject)) # 434 participants remaining
+
+```
+
+
+## Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+# effects on rt
+ant_rt_factors <- lmer(rt ~ stim_relevant * stim_irrelevant* congruence * cue + (1 | subject), data = data_ant)
+Anova(ant_rt_factors)
+# effects on accuracy
+ant_acc_factors <- glmer(data_ant$stim_relevant == data_ant$R ~ stim_relevant *stim_irrelevant * congruence * cue + (1 | subject), data = data_ant, family = binomial("probit"))
+Anova(ant_acc_factors)
+
+
+
+
+# based on above significance
+tapply(data_ant$rt,data_ant$congruence,mean)
+tapply(data_ant$rt,data_ant$stim_relevant,mean)
+tapply(data_ant$rt,data_ant$cue,mean)
+tapply(data_ant$rt,data_ant$stim_irrelevant,mean)
+
+
+tapply(data_ant$stim_relevant==data_ant$R,data_ant$congruence,mean)
+tapply(data_ant$stim_relevant==data_ant$R,data_ant$stim_irrelevant,mean)
+tapply(data_ant$stim_relevant==data_ant$R,data_ant$cue,mean)
+
+mean_rt_cong <- aggregate(rt ~ congruence + stim_relevant + stim_irrelevant + cue, data = data_ant, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+mean_acc_cong <- aggregate( data_ant$stim_relevant==data_ant$R ~ congruence + stim_relevant + stim_irrelevant + cue, data = data_ant, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+```
+
+
+## To EMC format
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_ant.Rdata")
+ant <- data_ant[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "congruence","cue", "R")]
+
+ant$stim_flanker <- ifelse(
+  ant$congruence == "congruent",
+  ant$stim_relevant,
+  ifelse(
+    ant$congruence == "incongruent",
+    ifelse(ant$stim_relevant == "left", "right", "left"),
+    'neutral'  # or "neutral", depending on what you want for neutral trials
+  )
+)
+ant <- ant[, c("subject", "rt", "stim_relevant","stim_flanker", "stim_irrelevant","cue", "R")]
+colnames(ant) <- c("subjects", "rt", "RS", "IS","IS_loc","CUE", "R")
+ant$subjects <- as.factor(ant$subjects)
+ant$R <- as.factor(ant$R)
+ant$RS <- as.factor(ant$RS)
+ant$IS <- as.factor(ant$IS)
+ant$IS_loc <- as.factor(ant$IS_loc)
+ant$CUE <- as.factor(ant$CUE)
+
+
+antSmall <- ant[ant$subjects %in% levels(ant$subjects)[1:50],]
+antSmall$subjects <- droplevels(antSmall$subjects)
+```
+
+# 5. Local-global task
+##Selecting variables for local-global task
+```{r}
+
+# Subset the dataframe
+full_data_loc_glob = local_global_letter[, c('worker_id',"exp_stage", 'rt',  'condition',  'conflict_condition', 'global_shape',  'local_shape','switch','key_press','correct_response', 'correct')]
+
+# Update 'response' based on 'key_press'
+full_data_loc_glob$key_press <- ifelse(full_data_loc_glob$key_press == 72, "h", 
+                          ifelse(full_data_loc_glob$key_press == 83, "s", full_data_loc_glob$key_press))
+
+# Update 'correct_response' based on its value
+full_data_loc_glob$correct_response <- ifelse(full_data_loc_glob$correct_response == 72, "h", 
+                                  ifelse(full_data_loc_glob$correct_response == 83, "s", full_data_loc_glob$correct_response))
+
+# only keeping the test block
+full_full_data_loc_glob = full_data_loc_glob[full_data_loc_glob$exp_stage == 'test',]
+
+
+
+#clean dataset
+data_loc_glob <- full_data_loc_glob[, c("worker_id", "rt", "global_shape", "local_shape", "condition","conflict_condition", "switch",  "key_press", "correct")]
+# Rename columns
+colnames(data_loc_glob) <- c("subject", "rt", "global", "local", "focus","congruence","switch", "R", "correct")
+# Convert rt from ms to seconds
+data_loc_glob$rt <- data_loc_glob$rt / 1000
+
+
+#convert to stimulus relevant and irrelevant columns
+data_loc_glob$stim_relevant <- ifelse(
+  data_loc_glob$focus == "global",
+  data_loc_glob$global,
+  data_loc_glob$local
+)
+
+data_loc_glob$stim_irrelevant <- ifelse(
+  data_loc_glob$focus == "global",
+  data_loc_glob$local,
+  data_loc_glob$global
+)
+
+# table(data_loc_glob$subject)
+length(unique(data_loc_glob$subject))
+```
+##Outlier detection
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+
+# Create a new column to track exclusion reasons
+data_loc_glob$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_loc_glob, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_loc_glob$exclusion_reason[data_loc_glob$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_loc_glob, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_loc_glob$exclusion_reason[data_loc_glob$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(data_loc_glob$correct ~ subject, data = data_loc_glob, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_loc_glob$exclusion_reason[data_loc_glob$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_loc_glob$subject, data_loc_glob$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_loc_glob$exclusion_reason[data_loc_glob$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_loc_glob, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_loc_glob), "\n")
+# Exclude those workers from the dataset
+data_loc_glob <- data_loc_glob[!data_loc_glob$subject %in% excluded_worker_ids, ] # removing participants 261 & 464
+# Print the number of rows before and after exclusion
+cat("Number of rows after exclusion:", nrow(data_loc_glob), "\n")
+
+data_loc_glob <- data_loc_glob[, !(colnames(data_loc_glob) %in% "exclusion_reason")]
+```
+##After Eisenberg's criteria
+```{r}
+sum(data_loc_glob$rt == -0.001, na.rm = TRUE)
+
+#removing all omitted trials
+data_loc_glob = data_loc_glob[data_loc_glob$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_loc_glob$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_loc_glob$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_loc_glob$outlier_combined <- outliers_combined
+data_loc_glob$outlier_z <- outliers_z
+data_loc_glob$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participloc_glob (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_loc_glob, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_loc_glob <- merge(data_loc_glob, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# # Step 5: Plot histograms of RTs, split by block
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_loc_glob[data_loc_glob$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) + 
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8)) 
+#   
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_loc_glob <- data_loc_glob %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    # fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold , -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_loc_glob = data_loc_glob[data_loc_glob$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_loc_glob, FUN = length)
+# # Calculate the number of omitted trials (assuming each participant should have 144 trials)
+# total_trials_per_worker$omitted_trials <- 144 - total_trials_per_worker$rt
+# # Calculate the percentage of omitted trials
+# total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 144) * 100
+
+## RETEST DATA
+# Calculate the number of omitted trials (assuming each participant should have 132 trials)
+total_trials_per_worker$omitted_trials <- 132 - total_trials_per_worker$rt
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 132) * 100
+
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] # excludes participants 233 & 440
+data_loc_glob <- data_loc_glob[!data_loc_glob$subject %in% excluded_omit, ]
+
+
+# Recheck: Median RT > 200 ms
+median_rt_check <- aggregate(rt ~ subject, data = data_loc_glob, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+cat("Participants failing median RT check:", paste(failed_median_rt, collapse = ", "), "\n")
+
+# Recheck: Accuracy > 60%
+accuracy_check <- aggregate(data_loc_glob$stim_relevant == data_loc_glob$R ~ subject, data = data_loc_glob, FUN = mean)
+colnames(accuracy_check)[2] <- "accuracy"
+failed_accuracy <- accuracy_check$subject[accuracy_check$accuracy <= 0.60]
+cat("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", "), "\n", "#", length(failed_accuracy)) # 9 partiicpants; s090, s092, s110, s157, s185, s327, s368, s462, s484 
+
+# Recheck: No single response > 95%
+response_freq_table <- table(data_loc_glob$subject, data_loc_glob$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+cat("Participants overusing a single response:", paste(failed_single_response, collapse = ", "), "\n")
+
+# Remove: Participants with 100% Accuracy
+# perfect_accuracy <- accuracy_check$subject[accuracy_check$accuracy == 1]
+# cat("Participants with 100% accuracy:", paste(perfect_accuracy, collapse = ", "), "\n") # 1 participant, s085
+
+# Exclude all failing participants
+# all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response, perfect_accuracy))
+all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+
+cat("Participants to exclude (any criterion):", paste(all_fails, collapse = ", "), "\n", '#', length(all_fails))
+
+# Final exclusion
+data_loc_glob <- data_loc_glob[!data_loc_glob$subject %in% all_fails, ]
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_loc_glob[data_loc_glob$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+
+
+#clean dataset
+data_loc_glob <- data_loc_glob[, c("subject", "rt", "global", "local","focus", "congruence","switch", "R", "correct", "stim_relevant", "stim_irrelevant")]
+length(unique(data_loc_glob$subject)) #511 participants remaining
+
+```
+## Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+# effects on rt
+loc_glob_rt_factors <- lmer(rt ~ stim_relevant * congruence * switch * focus + (1 | subject), data = data_loc_glob)
+Anova(loc_glob_rt_factors)
+# effects on accuracy
+loc_glob_acc_factors <- glmer(correct ~ stim_relevant * congruence * switch * focus + (1 | subject), data = data_loc_glob, family = binomial("probit"))
+Anova(loc_glob_acc_factors)
+
+
+
+
+
+
+# based on above significance
+tapply(data_loc_glob$rt,data_loc_glob$congruence,mean)
+tapply(data_loc_glob$rt,data_loc_glob$stim_relevant,mean)
+tapply(data_loc_glob$rt,data_loc_glob$switch,mean)
+
+tapply(data_loc_glob$correct,data_loc_glob$congruence,mean)
+tapply(data_loc_glob$correct,data_loc_glob$switch,mean)
+tapply(data_loc_glob$correct,data_loc_glob$focus,mean)
+
+mean_rt_cong <- aggregate(rt ~ congruence + stim_relevant + switch, data = data_loc_glob, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+mean_acc_cong <- aggregate(correct ~ congruence + switch + focus, data = data_loc_glob, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+
+```
+
+
+
+
+
+
+
+
+## To EMC format
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_loc_glob.Rdata")
+loc_glob <- data_loc_glob[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "switch",'focus', "R")]
+
+
+colnames(loc_glob) <- c("subjects", "rt", "RS", "IS","SWITCH","FOCUS", "R")
+loc_glob$subjects <- as.factor(loc_glob$subjects)
+loc_glob$R <- as.factor(loc_glob$R)
+loc_glob$RS <- as.factor(loc_glob$RS)
+loc_glob$IS <- as.factor(loc_glob$IS)
+loc_glob$SWITCH <- as.factor(loc_glob$SWITCH)
+loc_glob$FOCUS <- as.factor(loc_glob$FOCUS)
+
+
+loc_globSmall <- loc_glob[loc_glob$subjects %in% levels(loc_glob$subjects)[1:50],]
+loc_globSmall$subjects <- droplevels(loc_globSmall$subjects)
+```
+
+# 6. Shape matching task
+| Trial Type | Probe-Target | Target-Distractor | Distractor-Probe |
+| ---------- | ------------ | ----------------- | ---------------- |
+| `SSS`      | Same         | Same              | Same             |
+| `SDD`      | Same         | Different         | Different        |
+| `SNN`      | Same         | Neutral           | Neutral          |
+| `DSD`      | Different    | Same              | Different        |
+| `DDD`      | Different    | Different         | Different        |
+| `DDS`      | Different    | Different         | Same             |
+| `DNN`      | Different    | Neutral           | Neutral          |
+##Selecting variables shape-matching
+```{r}
+# Subset the dataframe
+full_data_shape = shape_matching[, c('worker_id',"exp_stage", 'rt', 'condition', 'correct_response','key_press','correct')]
+
+# Update 'response' based on 'key_press'
+full_data_shape$key_press <- ifelse(full_data_shape$key_press == 77, "same", 
+                          ifelse(full_data_shape$key_press == 90, "different", 
+                                  full_data_shape$key_press))
+
+# Update 'correct_response' based on its value
+full_data_shape$correct_response <- ifelse(full_data_shape$correct_response == 77, "same", 
+                                ifelse(full_data_shape$correct_response == 90, "different", 
+                                  full_data_shape$correct_response))
+
+# Changing the condition names to only contain the relation ship of the distractor to the target and probe
+# full_data_shape$condition <- substring(full_data_shape$condition, 2)
+
+
+# only keeping the test block
+full_data_shape = full_data_shape[full_data_shape$exp_stage == 'test',]
+
+
+
+#clean dataset
+data_shape <- full_data_shape[, c("worker_id", "rt", "correct_response", "condition", "key_press")]
+# Rename columns
+colnames(data_shape) <- c("subject", "rt", "correct_response", "stim_relevant", "R")
+# Convert rt from ms to seconds
+data_shape$rt <- data_shape$rt / 1000
+
+```
+## Outlier detection with Eisenberg's criteria
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+# Create a new column to track exclusion reasons
+data_shape$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_shape, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_shape$exclusion_reason[data_shape$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_shape, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_shape$exclusion_reason[data_shape$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(data_shape$correct_response == data_shape$R ~ subject, data = data_shape, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_shape$exclusion_reason[data_shape$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_shape$subject, data_shape$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_shape$exclusion_reason[data_shape$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_shape, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_shape), "\n")
+# Exclude those workers from the dataset
+data_shape <- data_shape[!data_shape$subject %in% excluded_worker_ids, ] # 11 participants because of missed trials
+# Print the number of rows before and after exclusion
+cat("Number of rows before exclusion:", nrow(data_shape), "\n")
+
+data_shape <- data_shape[, !(colnames(data_shape) %in% "exclusion_reason")]
+
+```
+
+## Outlier investigation after removing with Eisenberg's criteria
+```{r}
+#removing all omitted trials
+data_shape = data_shape[data_shape$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_shape$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_shape$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_shape$outlier_combined <- outliers_combined
+data_shape$outlier_z <- outliers_z
+data_shape$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participant (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_shape, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_shape <- merge(data_shape, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# # Step 5: Plot histograms of RTs, split by block
+# for (i in 1:43) { #check the highest block number
+#   plot_data <- data_shape[data_shape$block == i, ]
+# 
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) +
+#     geom_histogram( fill = "black", alpha = 0.7) +
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i),
+#          x = "Response Time (RT)",
+#          y = "Frequency") +
+#     theme_minimal() +
+#     theme(strip.text = element_text(size = 8))
+# 
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_shape <- data_shape %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold | rt < fast_threshold, -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold, -fast_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_shape = data_shape[data_shape$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_shape, FUN = length)
+# Calculate the number of omitted trials (assuming each participant should have 96 trials)
+total_trials_per_worker$omitted_trials <- 280 - total_trials_per_worker$rt
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 280) * 100
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] 
+data_shape <- data_shape[!data_shape$subject %in% excluded_omit, ]
+
+# recheck median
+median_rt_check <- aggregate(rt ~ subject, data = data_shape, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+cat("Participants failing median RT check:", paste(failed_median_rt, collapse = ", "), "\n")
+#recheck accuracy
+accuracy_check <- aggregate(data_shape$correct_response == data_shape$R ~ subject, data = data_shape, FUN = mean)
+colnames(accuracy_check)[2] <- "accuracy"
+failed_accuracy <- accuracy_check$subject[accuracy_check$accuracy <= 0.60]
+cat("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", "), "\n") # 2 partiicpants
+# recheck same response
+response_freq_table <- table(data_shape$subject, data_shape$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+# Total responses per subject
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+cat("Participants overusing a single response:", paste(failed_single_response, collapse = ", "), "\n")
+
+# perfect accuracy
+# perfect_accuracy <- accuracy_check$subject[accuracy_check$accuracy == 1]
+# cat("Participants with 100% accuracy:", paste(perfect_accuracy, collapse = ", "), "\n", "#", length(perfect_accuracy)) # 0 participants with perfect accuracy
+
+#remove
+# all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response, perfect_accuracy))
+all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+cat("Participants to exclude (any criterion):", paste(all_fails, collapse = ", "), "\n")
+# Exclude from dataset
+data_shape <- data_shape[!data_shape$subject %in% all_fails, ]
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_shape[data_shape$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+# 
+
+#clean dataset
+data_shape <- data_shape[, c("subject", "rt", "stim_relevant", "R")]
+length(unique(data_shape$subject)) #507 participants remaining. 
+
+```
+
+## Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+data_shape$stim_condition_combo <- interaction(data_shape$stim_relevant, data_shape$stim_irrelevant, drop = TRUE)
+
+# effects on rt
+# shape_rt_factors <- lmer(rt ~ stim_relevant * stim_irrelevant + (1 | subject), data = data_shape)
+shape_rt_factors <- lmer(rt ~ stim_relevant + (1 | subject), data = data_shape)
+Anova(shape_rt_factors)
+
+# effects on accuracy
+shape_acc_factors <- glmer(substr(data_shape$stim_relevant, 1, 1) == toupper(substr(data_shape$R, 1, 1)) ~ stim_relevant + (1 | subject),
+                           data = data_shape,
+                           family = binomial("probit"))
+
+Anova(shape_acc_factors)
+
+
+# based on above significance
+tapply(data_shape$rt,data_shape$stim_relevant,mean)
+tapply(data_shape$stim_relevant==data_shape$R,data_shape$stim_condition_combo,mean)
+
+mean_rt_cong <- aggregate(rt ~ stim_relevant, data = data_shape, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+mean_acc_cong <- aggregate( substr(data_shape$stim_relevant, 1, 1) == toupper(substr(data_shape$R, 1, 1)) ~ stim_relevant, data = data_shape, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+
+```
+
+
+## To EMC format
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_shape.Rdata")
+shape <- data_shape[, c("subject", "rt", "stim_relevant", "R")]
+
+
+colnames(shape) <- c("subjects", "rt", "Condition", "R")
+shape$subjects <- as.factor(shape$subjects)
+shape$R <- as.factor(shape$R)
+shape$Condition <- as.factor(shape$Condition)
+
+
+# shapeSmall <- shape[shape$subjects %in% levels(shape$subjects)[1:50],]
+# shapeSmall$subjects <- droplevels(shapeSmall$subjects)
+```
+
+# 7. Directed forgetting task
+##Selecting variables directed forgetting
+```{r}
+# Subset the dataframe
+full_data_dir_forg = directed_forgetting[, c('worker_id',"exp_stage", 'rt', 'probe_type', 'cue', 'correct_response','key_press','correct')]
+
+# Update 'response' based on 'key_press'
+full_data_dir_forg$key_press <- ifelse(full_data_dir_forg$key_press == 37, "in_remember", 
+                          ifelse(full_data_dir_forg$key_press == 39, "not_in_remember", 
+                                  full_data_dir_forg$key_press))
+
+# Update 'correct_response' based on its value
+full_data_dir_forg$correct_response <- ifelse(full_data_dir_forg$correct_response == 37, "in_remember", 
+                                ifelse(full_data_dir_forg$correct_response == 39, "not_in_remember", 
+                                  full_data_dir_forg$correct_response))
+
+full_data_dir_forg$probe_type <- ifelse(full_data_dir_forg$probe_type == "pos", "in_remember", 
+                                       ifelse(full_data_dir_forg$probe_type == "neg", "not_in_remember", 
+                                       ifelse(full_data_dir_forg$probe_type == "con", "control", 
+                                              full_data_dir_forg$probe_type)))
+
+
+
+# only keeping the test block
+full_data_dir_forg = full_data_dir_forg[full_data_dir_forg$exp_stage == 'test',]
+
+
+
+#clean dataset
+data_dir_forg <- full_data_dir_forg[, c("worker_id", "rt", "probe_type","cue", "key_press")]
+# Rename columns
+colnames(data_dir_forg) <- c("subject", "rt", "stim_relevant", "stim_irrelevant", "R")
+# Convert rt from ms to seconds
+data_dir_forg$rt <- data_dir_forg$rt / 1000
+
+```
+## Outlier detection with Eisenberg's criteria
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+# Create a new column to track exclusion reasons
+data_dir_forg$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_dir_forg, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_dir_forg$exclusion_reason[data_dir_forg$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_dir_forg, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_dir_forg$exclusion_reason[data_dir_forg$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(data_dir_forg$stim_relevant == data_dir_forg$R ~ subject, data = data_dir_forg, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_dir_forg$exclusion_reason[data_dir_forg$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_dir_forg$subject, data_dir_forg$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_dir_forg$exclusion_reason[data_dir_forg$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_dir_forg, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_dir_forg), "\n")
+# Exclude those workers from the dataset
+data_dir_forg <- data_dir_forg[!data_dir_forg$subject %in% excluded_worker_ids, ] # 12 participants because of missed trials
+# Print the number of rows before and after exclusion
+cat("Number of rows before exclusion:", nrow(data_dir_forg), "\n")
+
+data_dir_forg <- data_dir_forg[, !(colnames(data_dir_forg) %in% "exclusion_reason")]
+
+```
+
+## Outlier investigation after removing with Eisenberg's criteria
+```{r}
+#removing all omitted trials
+data_dir_forg = data_dir_forg[data_dir_forg$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_dir_forg$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_dir_forg$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_dir_forg$outlier_combined <- outliers_combined
+data_dir_forg$outlier_z <- outliers_z
+data_dir_forg$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participant (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_dir_forg, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_dir_forg <- merge(data_dir_forg, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# # Step 5: Plot histograms of RTs, split by block
+# for (i in 1:43) { #check the highest block number
+#   plot_data <- data_dir_forg[data_dir_forg$block == i, ]
+# 
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) +
+#     geom_histogram( fill = "black", alpha = 0.7) +
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i),
+#          x = "Response Time (RT)",
+#          y = "Frequency") +
+#     theme_minimal() +
+#     theme(strip.text = element_text(size = 8))
+# 
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_dir_forg <- data_dir_forg %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold | rt < fast_threshold, -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold, -fast_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_dir_forg = data_dir_forg[data_dir_forg$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_dir_forg, FUN = length)
+# Calculate the number of omitted trials (assuming each participant should have 96 trials)
+total_trials_per_worker$omitted_trials <- 72 - total_trials_per_worker$rt
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 72) * 100
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] 
+data_dir_forg <- data_dir_forg[!data_dir_forg$subject %in% excluded_omit, ]
+
+# recheck median
+median_rt_check <- aggregate(rt ~ subject, data = data_dir_forg, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+cat("Participants failing median RT check:", paste(failed_median_rt, collapse = ", "), "\n")
+#recheck accuracy
+data_dir_forg$stim_corrected <- ifelse(data_dir_forg$stim_relevant == "control", 
+                                       "not_in_remember", 
+                                       data_dir_forg$stim_relevant)
+accuracy_check <- aggregate(data_dir_forg$stim_corrected == data_dir_forg$R ~ subject, data = data_dir_forg, FUN = mean)
+colnames(accuracy_check)[2] <- "accuracy"
+failed_accuracy <- accuracy_check$subject[accuracy_check$accuracy <= 0.60]
+cat("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", "), "\n", "#", length(failed_accuracy)) # 14 participants too low accuracy
+# recheck same response
+response_freq_table <- table(data_dir_forg$subject, data_dir_forg$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+# Total responses per subject
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+cat("Participants overusing a single response:", paste(failed_single_response, collapse = ", "), "\n")
+
+# perfect accuracy
+# perfect_accuracy <- accuracy_check$subject[accuracy_check$accuracy == 1]
+# cat("Participants with 100% accuracy:", paste(perfect_accuracy, collapse = ", "), "\n", "#", length(perfect_accuracy)) # 0 participants with perfect accuracy
+
+#remove
+# all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response, perfect_accuracy))
+all_fails <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+cat("Participants to exclude (any criterion):", paste(all_fails, collapse = ", "), "\n")
+# Exclude from dataset
+data_dir_forg <- data_dir_forg[!data_dir_forg$subject %in% all_fails, ]
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_dir_forg[data_dir_forg$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+# 
+
+#clean dataset
+data_dir_forg <- data_dir_forg[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "stim_corrected", "R")]
+length(unique(data_dir_forg$subject)) #495 participants remaining. 
+
+```
+
+## Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+# effects on rt
+dir_forg_rt_factors <- lmer(rt ~ stim_relevant * stim_irrelevant + (1 | subject), data = data_dir_forg)
+Anova(dir_forg_rt_factors)
+
+# effects on accuracy
+dir_forg_acc_factors <- glmer(data_dir_forg$stim_corrected == data_dir_forg$R ~ stim_relevant * stim_irrelevant + (1 | subject), data = data_dir_forg, family = binomial("probit"))
+
+Anova(dir_forg_acc_factors)
+
+
+# based on above significance
+tapply(data_dir_forg$rt,data_dir_forg$stim_relevant,mean)
+tapply(data_dir_forg$rt,data_dir_forg$stim_irrelevant,mean)
+tapply(data_dir_forg$stim_corrected==data_dir_forg$R,data_dir_forg$stim_relevant,mean)
+tapply(data_dir_forg$stim_corrected==data_dir_forg$R,data_dir_forg$stim_irrelevant,mean)
+
+mean_rt_cong <- aggregate(rt ~ stim_irrelevant + stim_relevant, data = data_dir_forg, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+mean_acc_cong <- aggregate( data_dir_forg$stim_corrected==data_dir_forg$R ~ stim_irrelevant + stim_relevant, data = data_dir_forg, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+
+```
+
+
+## To EMC format
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_dir_forg.Rdata")
+dir_forg <- data_dir_forg[, c("subject", "rt", "stim_relevant", "stim_irrelevant", "R")]
+
+
+colnames(dir_forg) <- c("subjects", "rt", "RS", "IS", "R")
+dir_forg$subjects <- as.factor(dir_forg$subjects)
+dir_forg$R <- as.factor(dir_forg$R)
+dir_forg$RS <- as.factor(dir_forg$RS)
+dir_forg$IS <- as.factor(dir_forg$IS)
+
+
+dir_forgSmall <- dir_forg[dir_forg$subjects %in% levels(dir_forg$subjects)[1:50],]
+dir_forgSmall$subjects <- droplevels(dir_forgSmall$subjects)
+```
+
+
+
+# 8. Cue/task switching task
+
+## Selecting variables for cue_task
+for example, press Z key if colored number was orange, greater than 5, or odd
+```{r}
+# Subset the dataframe
+full_data_cue_task = cue_task_switching[, c('worker_id',"exp_stage", 'rt', "CTI","stim_color", "stim_number", "switch_type", "task", "task_switch",  'correct_response','key_press','correct', 'possible_responses')]
+
+# Update 'response' based on 'key_press'
+full_data_cue_task$key_press <- ifelse(full_data_cue_task$key_press == 77, "right", 
+                          ifelse(full_data_cue_task$key_press == 90, "left", full_data_cue_task$key_press))
+
+# Update 'correct_response' based on its value
+full_data_cue_task$correct_response <- ifelse(full_data_cue_task$correct_response == 77, "right", 
+                                  ifelse(full_data_cue_task$correct_response == 90, "left", full_data_cue_task$correct_response))
+
+# making correct numeric
+full_data_cue_task$correct <- ifelse(full_data_cue_task$correct == "True", 1, 
+                                  ifelse(full_data_cue_task$correct == "False", 0, full_data_cue_task$correct))
+full_data_cue_task$correct <- as.numeric(full_data_cue_task$correct)
+# only keeping the test block
+full_data_cue_task = full_data_cue_task[full_data_cue_task$exp_stage == 'test',]
+
+```
+
+```{r}
+full_data_cue_task <- full_data_cue_task %>%
+  group_by(worker_id) %>%
+  arrange(worker_id, row_number()) %>%  # Ensure proper order within subject
+  mutate(
+    previous_correct_response = lag(correct_response),
+    response_repeat = case_when(
+      is.na(previous_correct_response) ~ NA_character_,
+      correct_response == previous_correct_response ~ "same",
+      TRUE ~ "different"
+    )
+  ) %>%
+  ungroup()
+
+```
+
+```{r}
+
+#clean dataset
+data_cue_task <- full_data_cue_task[, c('worker_id', 'rt', "CTI","stim_color", "stim_number", "switch_type", "task", "task_switch",  'correct_response','key_press','correct', 'possible_responses', 'response_repeat')]
+# Rename columns
+colnames(data_cue_task) <- c("subject", "rt", "CTI","stim_color", "stim_number", "switch_type", "task", "task_switch",  'correct_response','R','correct', 'possible_responses', "response_repeat")
+# Convert rt from ms to seconds
+data_cue_task$rt <- data_cue_task$rt / 1000
+
+```
+
+## Outlier detection of Eisenberg
+Eisenberg's criteria: In general we required that median response times were longer than 200 ms, no more than 25%​ ​of responses were omitted, accuracy was higher than 60% and no single response was given more than 95% of the time.
+```{r}
+# Create a new column to track exclusion reasons
+data_cue_task$exclusion_reason <- NA  # Initialize with NA for no exclusion
+
+# Step 1: Calculate median RT per worker_id and exclude participants with median RT <= 200 ms
+median_rt_per_worker <- aggregate(rt ~ subject, data = data_cue_task, FUN = median, na.rm = TRUE)
+excluded_median_rt <- median_rt_per_worker$subject[median_rt_per_worker$rt <= 0.2]
+data_cue_task$exclusion_reason[data_cue_task$subject %in% excluded_median_rt] <- "Median RT <= 200 ms"
+
+# Step 2: Calculate the percentage of omitted responses (rt == -1) and exclude if more than 25% are omitted
+omit_percentage_per_worker <- aggregate(rt ~ subject, data = data_cue_task, FUN = function(x) mean(x == -0.001, na.rm = TRUE))  # Calculate the proportion of omitted responses
+excluded_omit <- omit_percentage_per_worker$subject[omit_percentage_per_worker$rt > 0.25]
+data_cue_task$exclusion_reason[data_cue_task$subject %in% excluded_omit] <- "Omitted responses > 25%"
+
+# Step 3: Calculate accuracy per worker_id and exclude if accuracy is <= 60%
+accuracy_per_worker <- aggregate(correct ~ subject, data = data_cue_task, FUN = function(x) mean(x, na.rm = TRUE))  # Calculate accuracy
+excluded_accuracy <- accuracy_per_worker$subject[accuracy_per_worker$correct <= 0.60]
+data_cue_task$exclusion_reason[data_cue_task$subject %in% excluded_accuracy] <- "Accuracy <= 60%"
+
+# Step 4: Check if no single response (key_press) is given more than 95% of the time for each worker
+# Count the occurrences of each key_press per worker_id
+response_frequency_per_worker <- table(data_cue_task$subject, data_cue_task$R)
+# Convert to a data frame for easier handling
+response_frequency_per_worker_df <- as.data.frame(response_frequency_per_worker)
+# Rename the columns for clarity
+colnames(response_frequency_per_worker_df) <- c("subject", "R", "count")
+
+# Calculate the total number of responses per worker_id
+total_responses_per_worker <- aggregate(count ~ subject, data = response_frequency_per_worker_df, FUN = sum)
+# Merge the total responses with the frequency data
+response_percentage_per_worker <- merge(response_frequency_per_worker_df, total_responses_per_worker, by = "subject")
+# Calculate the percentage of each key_press response per worker
+response_percentage_per_worker$percentage <- response_percentage_per_worker$count.x / response_percentage_per_worker$count.y
+
+# Find workers where any key_press response is given more than 95% of the time
+excluded_single_response <- response_percentage_per_worker$subject[response_percentage_per_worker$percentage > 0.95]
+data_cue_task$exclusion_reason[data_cue_task$subject %in% excluded_single_response] <- "Single response > 95%"
+
+# To create a summary of exclusions, showing the worker_id and corresponding exclusion reasons
+# We will aggregate exclusion reasons for each worker_id
+excluded_summary <- aggregate(exclusion_reason ~ subject, data = data_cue_task, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the summary of excluded workers and their exclusion reasons
+print(excluded_summary)
+# Exclude workers in the excluded summary from the data
+excluded_worker_ids <- excluded_summary$subject  # Get the list of excluded worker_ids
+cat("Number of rows before exclusion:", nrow(data_cue_task), "\n")
+# Exclude those workers from the dataset
+data_cue_task <- data_cue_task[!data_cue_task$subject %in% excluded_worker_ids, ] # removing 28 participants
+# Print the number of rows before and after exclusion
+cat("Number of rows before exclusion:", nrow(data_cue_task), "\n")
+
+data_cue_task <- data_cue_task[, !(colnames(data_cue_task) %in% "exclusion_reason")]
+
+```
+
+## After Eisenberg's criteria
+```{r}
+#removing all omitted trials
+data_cue_task = data_cue_task[data_cue_task$rt!= -0.001,]
+
+# plotting all rt histograms based on amout of outliers
+# Step 1: Calculate Z-scores for RTs
+z_scores <- scale(data_cue_task$rt )
+# Define outliers based on Z-score > 3 or < -3, or RT < 0.15
+outliers_z <- abs(z_scores) > 3  # Z-score outliers
+outliers_rt <- data_cue_task$rt < 0.15  # Fast RT outliers
+outliers_combined <- outliers_z | outliers_rt
+# Add the outlier information to the dataset
+data_cue_task$outlier_combined <- outliers_combined
+data_cue_task$outlier_z <- outliers_z
+data_cue_task$outlier_rt <- outliers_rt
+# Step 2: Count the number of outliers per participant (worker_id)
+outlier_count_per_worker <- aggregate(outlier_combined ~ subject, data = data_cue_task, FUN = sum)
+# Step 3: Sort participants by the number of outliers (in descending order)
+outlier_count_per_worker <- outlier_count_per_worker[order(outlier_count_per_worker$V1, decreasing = T),]
+# Step 4: Split participants into blocks of 12
+outlier_count_per_worker$block <- rep(1:ceiling(nrow(outlier_count_per_worker)/12), each = 12, length.out = nrow(outlier_count_per_worker))
+# Merge back to get the block information into the original data
+data_cue_task <- merge(data_cue_task, outlier_count_per_worker[, c("subject", "block")], by = "subject", all.x = TRUE)
+# Step 5: Plot histograms of RTs, split by block
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_cue_task[data_cue_task$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) + 
+#     xlim(0, NA) + # Customize histogram appearance
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8)) 
+#   
+#   print(plot)
+# }
+
+
+# Calculate the slow and fast thresholds per participant and modify RT for outliers
+data_cue_task <- data_cue_task %>%
+  group_by(subject) %>%
+  mutate(
+    mean_rt = mean(rt, na.rm = TRUE),  # Calculate the mean RT per participant
+    sd_rt = sd(rt, na.rm = TRUE),      # Calculate the SD RT per participant
+    slow_threshold = mean_rt + 3 * sd_rt,  # Set slow threshold (mean + 3 * SD)
+    fast_threshold = 0.15,             # Set fast threshold at 0.15
+    rt = ifelse(rt > slow_threshold | rt < fast_threshold, -0.001, rt)  # Set RT to -0.001 for slow or fast trials
+  ) %>%
+  select(-mean_rt, -sd_rt, -slow_threshold, -fast_threshold)  # Optionally remove helper columns
+#removing the outliers identified above
+data_cue_task = data_cue_task[data_cue_task$rt!= -0.001,]
+
+# check again to see if number of omissions are below 25%
+# Count the total number of rows (trials) per participant
+total_trials_per_worker <- aggregate(rt ~ subject, data = data_cue_task, FUN = length)
+# Calculate the number of omitted trials (assuming each participant should have 100 trials)
+total_trials_per_worker$omitted_trials <- 440 - total_trials_per_worker$rt
+# Calculate the percentage of omitted trials
+total_trials_per_worker$omit_percentage <- (total_trials_per_worker$omitted_trials / 440) * 100
+excluded_omit <- total_trials_per_worker$subject[total_trials_per_worker$omit_percentage > 25] # excludes participant 541
+data_cue_task <- data_cue_task[!data_cue_task$subject %in% excluded_omit, ]
+
+#recheck median rt
+median_rt_check <- aggregate(rt ~ subject, data = data_cue_task, FUN = median)
+failed_median_rt <- median_rt_check$subject[median_rt_check$rt <= 0.2]
+print(paste("Participants failing median RT check:", paste(failed_median_rt, collapse = ", ")))
+#recheck accuracy
+accuracy_check <- aggregate(correct ~ subject, data = data_cue_task, FUN = function(x) mean(x, na.rm = TRUE))
+failed_accuracy <- accuracy_check$subject[accuracy_check$correct <= 0.60]
+print(paste("Participants failing accuracy check:", paste(failed_accuracy, collapse = ", ")))
+#recheck single response
+response_freq_table <- table(data_cue_task$subject, data_cue_task$R)
+response_freq_df <- as.data.frame(response_freq_table)
+colnames(response_freq_df) <- c("subject", "R", "count")
+# Total responses per subject
+total_responses <- aggregate(count ~ subject, data = response_freq_df, sum)
+response_freq_df <- merge(response_freq_df, total_responses, by = "subject")
+response_freq_df$prop <- response_freq_df$count.x / response_freq_df$count.y
+failed_single_response <- unique(response_freq_df$subject[response_freq_df$prop > 0.95])
+print(paste("Participants overusing a single response:", paste(failed_single_response, collapse = ", ")))
+
+# remove recheck fails
+all_failed <- unique(c(failed_median_rt, failed_accuracy, failed_single_response))
+data_cue_task <- data_cue_task[!data_cue_task$subject %in% all_failed, ]
+
+# # remove 100% accuracy
+# # Step 1: Compute accuracy per participant
+# accuracy_check <- aggregate(correct ~ subject, data = data_cue_task, FUN = function(x) mean(x, na.rm = TRUE))
+# # Step 2: Identify participants with 100% accuracy
+# perfect_accuracy_subjects <- accuracy_check$subject[accuracy_check$correct == 1]
+# # Step 3: Remove them from the dataset
+# data_cue_task <- data_cue_task[!data_cue_task$subject %in% perfect_accuracy_subjects, ]
+# # Step 4: (Optional) Print removed subject IDs
+# cat("Removed participants with 100% accuracy:", paste(perfect_accuracy_subjects, collapse = ", "), "\n","#", length(perfect_accuracy_subjects)) #rmoving 62 participants
+
+
+# #plotting again to see effect of outlier removal
+# for (i in 1:44) { #check the highest block number
+#   plot_data <- data_cue_task[data_cue_task$block == i, ]
+#   
+#   # Create the histogram for the block
+#   plot <- ggplot(plot_data, aes(x = rt)) + 
+#     geom_histogram(binwidth = 0.05, fill = "black", alpha = 0.7) +  # Customize histogram appearance
+#     xlim(0, NA) + 
+#     facet_wrap(~ subject, ncol = 3) +  # 3 histograms per row
+#     labs(title = paste("RT Distribution for Block", i), 
+#          x = "Response Time (RT)", 
+#          y = "Frequency") + 
+#     theme_minimal() + 
+#     theme(strip.text = element_text(size = 8))    
+#   
+#   print(plot)
+# }
+
+
+
+#clean dataset
+data_cue_task <- data_cue_task[, c("subject", "rt", "CTI","stim_color", "stim_number", "switch_type", "task", "task_switch",  'correct_response','R','correct', 'possible_responses', "response_repeat")]
+length(unique(data_cue_task$subject)) #494 participants remaining
+
+```
+
+##Initial effects
+```{r}
+### Look at factor effects on summary statistics ----
+
+tapply(data_cue_task$rt, 
+       list(data_cue_task$stim_number, 
+            data_cue_task$stim_color, 
+            data_cue_task$CTI, 
+            data_cue_task$switch_type, 
+            data_cue_task$task), 
+       mean)
+
+# effects on rt
+cue_task_rt_factors1 <- lmer(rt ~  CS*MS*PS*CTI * trial_type * task_type + (1 | subjects), data = cue_task)
+Anova(cue_task_rt_factors1)
+
+
+
+# effects on accuracy
+cue_task_acc_factors <- glmer(correct ~ CTI * switch_type * task + (1 | subject), data = data_cue_task, family = binomial("probit"))
+Anova(cue_task_acc_factors)
+
+
+
+# based on above significance
+tapply(data_cue_task$rt,data_cue_task$CTI,mean)
+tapply(data_cue_task$rt,data_cue_task$switch_type,mean)
+tapply(data_cue_task$rt,data_cue_task$task,mean)
+
+tapply(data_cue_task$correct,data_cue_task$CTI,mean)
+tapply(data_cue_task$correct,data_cue_task$switch_type,mean)
+tapply(data_cue_task$correct,data_cue_task$task,mean)
+
+
+mean_rt_cong <- aggregate(rt ~ CTI + switch_type + task, data = data_cue_task, FUN = function(x) round(mean(x), 3))
+print(mean_rt_cong)
+
+mean_acc_cong <- aggregate(correct ~ CTI + switch_type + task, data = data_cue_task, FUN = function(x) round(mean(x), 3))
+print(mean_acc_cong)
+
+```
+
+
+
+
+
+
+## Load data
+```{r}
+load("C:\\Users\\Marit\\Downloads\\Documenten UvA\\ResMas\\Thesis\\Conflict tasks\\Data\\data_cue_task.Rdata")
+cue_task <- data_cue_task[, c("subject", "rt", "CTI","stim_color", "stim_number", "switch_type", "task", "task_switch",  'correct_response','R','correct', 'possible_responses', "response_repeat")]
+```
+## Change data to EMC format
+```{r}
+cue_task$correct_response_mapped <- NA
+# Use ifelse to map R responses
+cue_task$correct_response_mapped <- ifelse(cue_task$possible_responses == "[90, 77]",
+                      ifelse(cue_task$correct_response == "right", "right: odd, <5, blue", 
+                             ifelse(cue_task$correct_response == "left", "left: even, >5, orange", NA)),
+                      ifelse(cue_task$possible_responses == "[77, 90]",
+                             ifelse(cue_task$correct_response == "right", "right: even, >5, orange", 
+                                    ifelse(cue_task$correct_response == "left", "left: odd, <5, blue", NA)),
+                             NA))
+
+```
+
+
+```{r}
+
+cue_task <- cue_task %>%
+  mutate(
+    # Derive stimulus features
+    stim_parity = ifelse(stim_number %% 2 == 0, "even", "odd"),
+    stim_magnitude = ifelse(stim_number < 5, "<5", ">5"),
+    
+    # Determine correct direction for color
+    color_stimulus = case_when(
+      possible_responses == "[90, 77]" & stim_color == "blue" ~ "right",
+      possible_responses == "[90, 77]" & stim_color == "orange" ~ "left",
+      possible_responses == "[77, 90]" & stim_color == "orange" ~ "right",
+      possible_responses == "[77, 90]" & stim_color == "blue" ~ "left",
+      TRUE ~ NA_character_
+    ),
+    
+    # Determine correct direction for parity
+    parity_stimulus = case_when(
+      possible_responses == "[90, 77]" & stim_parity == "odd" ~ "right",
+      possible_responses == "[90, 77]" & stim_parity == "even" ~ "left",
+      possible_responses == "[77, 90]" & stim_parity == "even" ~ "right",
+      possible_responses == "[77, 90]" & stim_parity == "odd" ~ "left",
+      TRUE ~ NA_character_
+    ),
+    
+    # Determine correct direction for magnitude
+    magnitude_stimulus = case_when(
+      possible_responses == "[90, 77]" & stim_magnitude == "<5" ~ "right",
+      possible_responses == "[90, 77]" & stim_magnitude == ">5" ~ "left",
+      possible_responses == "[77, 90]" & stim_magnitude == ">5" ~ "right",
+      possible_responses == "[77, 90]" & stim_magnitude == "<5" ~ "left",
+      TRUE ~ NA_character_
+    )
+  )
+
+```
+
+
+
+```{r}
+cue_task <- cue_task %>%
+  mutate(
+    # Check if all three directions are the same
+    consistent_response = case_when(
+      is.na(color_stimulus) | is.na(parity_stimulus) | is.na(magnitude_stimulus) ~ NA,
+      color_stimulus == parity_stimulus & color_stimulus == magnitude_stimulus ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+```
+
+
+```{r}
+
+
+cue_task <- cue_task[, c("subject", "rt", "color_stimulus", "parity_stimulus","magnitude_stimulus" ,"CTI", "task", "switch_type","response_repeat","consistent_response", "R")]
+
+
+
+colnames(cue_task) <- c("subjects", "rt", "CS", "PS",'MS',"CTI", 'task_type',"trial_type","response_repeat","consistent_response", "R")
+cue_task$subjects <- as.factor(cue_task$subjects)
+cue_task$R <- as.factor(cue_task$R)
+cue_task$CS <- as.factor(cue_task$CS)
+cue_task$PS <- as.factor(cue_task$PS)
+cue_task$MS <- as.factor(cue_task$MS)
+cue_task$CTI <- as.factor(cue_task$CTI)
+cue_task$trial_type <- as.factor(cue_task$trial_type)
+cue_task$task_type <- as.factor(cue_task$task_type)
+cue_task$response_repeat <- as.factor(cue_task$response_repeat)
+cue_task$consistent_response <- as.factor(cue_task$consistent_response)
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+# 9. Saving the datafiles
+## A specific file
+```{r}
+# Define the path to your desired location
+file_path <- "C:/Users/Marit/Downloads/Documenten UvA/ResMas/Thesis/Conflict tasks/Data/retest_data_LocGlob.Rdata"
+
+# Save the dataset to the specified location
+save(loc_glob, file = file_path)
+
+```
+
+
+## All data objects
+```{r}
+# List all objects in the workspace
+all_objects <- ls()
+
+# Filter objects that start with 'data_' but exclude 'data_directory' and 'data_list'
+data_objects <- all_objects[grepl("^data_", all_objects) & !all_objects %in% c("data_directory", "data_list", "data_objects")]
+
+# Define the directory where the files should be saved
+save_directory <- "C:/Users/Marit/Downloads/Documenten UvA/ResMas/Thesis/Conflict tasks/Data/"
+
+# Save each object individually
+for (obj in data_objects) {
+  # Define the file path for each object
+  file_path <- paste0(save_directory, obj, ".RData")
+  
+  # Save the object to the specified path
+  save(list = obj, file = file_path)
+}
+
+```
+
+## Variables
+```{r}
+# Define the path where you want to save the variables
+save_path <- "C:/Users/Marit/Downloads/Documenten UvA/ResMas/Thesis/Conflict tasks/Outputs/factor_effects.RData"
+
+# Save your variables (e.g., loc_glob_acc_factors)
+# Save multiple variables
+save( stroop_acc_factors, stroop_rt_factors,simon_acc_factors, simon_rt_factors, ant_acc_factors, ant_rt_factors,loc_glob_rt_factors, loc_glob_acc_factors, file = save_path)
+```
+
